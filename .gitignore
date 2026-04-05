@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Azure / secrets
+*.pem
+*.pfx
+*.key
+service_principal.json
+azure_credentials.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Data files (local cache, never commit raw data)
+data/raw/
+data/processed/
+*.parquet
+*.csv
+*.json.tmp
+
+# Jupyter
+.ipynb_checkpoints/
