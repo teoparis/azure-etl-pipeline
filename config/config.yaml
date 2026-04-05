@@ -1,0 +1,57 @@
+# Azure ETL Pipeline — configuration
+# Sensitive values must be set via environment variables (see .env.example)
+
+azure:
+  tenant_id: ${AZURE_TENANT_ID}
+  client_id: ${AZURE_CLIENT_ID}
+  storage_account: ${AZURE_STORAGE_ACCOUNT}
+  container: ${AZURE_STORAGE_CONTAINER}
+  # Optional: set only for local dev without SP auth
+  connection_string: ${AZURE_STORAGE_CONNECTION_STRING:-}
+
+sources:
+  rest_api:
+    base_url: ${REST_API_BASE_URL}
+    endpoints:
+      orders: /v2/orders
+      order_items: /v2/order-items
+    auth:
+      type: bearer
+      token_env: REST_API_TOKEN
+    pagination:
+      strategy: next_page_token          # or "offset"
+      page_size: 500
+      token_field: next_page_token       # field in response body
+      results_field: data                # field containing the records
+    timeout_seconds: 30
+    max_pages: 1000                      # safety cap
+
+  jdbc:
+    driver: "{ODBC Driver 18 for SQL Server}"
+    host: ${JDBC_HOST}
+    port: ${JDBC_PORT:-1433}
+    database: ${JDBC_DATABASE}
+    username: ${JDBC_USERNAME}
+    password_env: JDBC_PASSWORD
+    # TrustServerCertificate=yes for dev environments only
+    extra_params: "TrustServerCertificate=yes;Encrypt=yes"
+    chunk_size: 10000                    # rows per chunk to avoid OOM
+
+pipeline:
+  batch_size: 5000                       # rows per write batch to ADLS
+  retry_attempts: 3
+  retry_wait_seconds: 2
+  retry_max_wait_seconds: 30
+  log_level: ${LOG_LEVEL:-INFO}
+  log_dir: logs/
+  dry_run: false
+
+adls:
+  # Parquet output path pattern: raw/{entity}/year={Y}/month={M}/day={D}/
+  base_path: raw
+  partition_columns:
+    - year
+    - month
+    - day
+  write_mode: overwrite                  # overwrite | append
+  compression: snappy
