@@ -1,0 +1,297 @@
+{
+  "name": "PipelineOrdersIngestion",
+  "properties": {
+    "description": "Incremental ingestion of orders from REST API into ADLS Gen2 (parquet, partitioned by date). Implements a watermark pattern via a SQL control table.",
+    "parameters": {
+      "WindowStart": {
+        "type": "String",
+        "defaultValue": "@{formatDateTime(adddays(utcnow(), -1), 'yyyy-MM-dd')}"
+      },
+      "WindowEnd": {
+        "type": "String",
+        "defaultValue": "@{formatDateTime(utcnow(), 'yyyy-MM-dd')}"
+      },
+      "TargetContainer": {
+        "type": "String",
+        "defaultValue": "raw"
+      },
+      "TargetEntity": {
+        "type": "String",
+        "defaultValue": "orders"
+      }
+    },
+    "variables": {
+      "LastWatermark": {
+        "type": "String"
+      },
+      "NewWatermark": {
+        "type": "String"
+      }
+    },
+    "activities": [
+      {
+        "name": "LookupLastWatermark",
+        "description": "Read the last successfully processed watermark from the control table.",
+        "type": "Lookup",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "AzureSqlSource",
+            "sqlReaderQuery": {
+              "value": "SELECT TOP 1 watermark_value AS LastWatermark FROM dbo.etl_watermark WHERE entity_name = '@{pipeline().parameters.TargetEntity}' ORDER BY updated_at DESC",
+              "type": "Expression"
+            }
+          },
+          "dataset": {
+            "referenceName": "DS_AzureSQL_ControlDB",
+            "type": "DatasetReference"
+          },
+          "firstRowOnly": true
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_AzureSQL_ControlDB",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "SetLastWatermark",
+        "description": "Store the watermark value in a pipeline variable for use in the Copy activity filter.",
+        "type": "SetVariable",
+        "dependsOn": [
+          {
+            "activity": "LookupLastWatermark",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "typeProperties": {
+          "variableName": "LastWatermark",
+          "value": {
+            "value": "@activity('LookupLastWatermark').output.firstRow.LastWatermark",
+            "type": "Expression"
+          }
+        }
+      },
+      {
+        "name": "CopyOrdersFromREST",
+        "description": "Copy orders updated after the watermark from the REST API into ADLS Gen2 as Parquet.",
+        "type": "Copy",
+        "dependsOn": [
+          {
+            "activity": "SetLastWatermark",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.02:00:00",
+          "retry": 3,
+          "retryIntervalInSeconds": 60,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "source": {
+            "type": "RestSource",
+            "httpRequestTimeout": "00:03:00",
+            "requestInterval": "00.00:00:00.010",
+            "requestMethod": "GET",
+            "additionalHeaders": {
+              "Authorization": {
+                "value": "@{concat('Bearer ', linkedService().RestApiToken)}",
+                "type": "Expression"
+              }
+            },
+            "paginationRules": {
+              "QueryParameters.next_page_token": "$.next_page_token",
+              "EndCondition:$.next_page_token": "IsEmpty"
+            }
+          },
+          "sink": {
+            "type": "ParquetSink",
+            "storeSettings": {
+              "type": "AzureBlobFSWriteSettings",
+              "copyBehavior": "MergeFiles"
+            },
+            "formatSettings": {
+              "type": "ParquetWriteSettings",
+              "fileExtension": ".parquet"
+            }
+          },
+          "enableStaging": false,
+          "dataIntegrationUnits": 4,
+          "parallelCopies": 2,
+          "translator": {
+            "type": "TabularTranslator",
+            "typeConversion": true,
+            "typeConversionSettings": {
+              "allowDataTruncation": false,
+              "treatBooleanAsNumber": false
+            }
+          }
+        },
+        "inputs": [
+          {
+            "referenceName": "DS_REST_OrdersAPI",
+            "type": "DatasetReference",
+            "parameters": {
+              "updated_after": {
+                "value": "@variables('LastWatermark')",
+                "type": "Expression"
+              },
+              "updated_before": {
+                "value": "@{pipeline().parameters.WindowEnd}",
+                "type": "Expression"
+              },
+              "limit": "500"
+            }
+          }
+        ],
+        "outputs": [
+          {
+            "referenceName": "DS_ADLS_OrdersParquet",
+            "type": "DatasetReference",
+            "parameters": {
+              "container": {
+                "value": "@pipeline().parameters.TargetContainer",
+                "type": "Expression"
+              },
+              "entity": {
+                "value": "@pipeline().parameters.TargetEntity",
+                "type": "Expression"
+              },
+              "year": {
+                "value": "@{formatDateTime(pipeline().parameters.WindowStart, 'yyyy')}",
+                "type": "Expression"
+              },
+              "month": {
+                "value": "@{formatDateTime(pipeline().parameters.WindowStart, 'MM')}",
+                "type": "Expression"
+              },
+              "day": {
+                "value": "@{formatDateTime(pipeline().parameters.WindowStart, 'dd')}",
+                "type": "Expression"
+              }
+            }
+          }
+        ],
+        "linkedServiceName": {
+          "referenceName": "LS_REST_OrdersAPI",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "UpdateWatermark",
+        "description": "Persist the new watermark (WindowEnd) to the control table after successful copy.",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          {
+            "activity": "CopyOrdersFromREST",
+            "dependencyConditions": ["Succeeded"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:05:00",
+          "retry": 2,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false
+        },
+        "typeProperties": {
+          "storedProcedureName": "dbo.usp_UpdateWatermark",
+          "storedProcedureParameters": {
+            "EntityName": {
+              "value": {
+                "value": "@pipeline().parameters.TargetEntity",
+                "type": "Expression"
+              },
+              "type": "String"
+            },
+            "NewWatermark": {
+              "value": {
+                "value": "@pipeline().parameters.WindowEnd",
+                "type": "Expression"
+              },
+              "type": "String"
+            },
+            "RowsCopied": {
+              "value": {
+                "value": "@activity('CopyOrdersFromREST').output.rowsCopied",
+                "type": "Expression"
+              },
+              "type": "Int64"
+            }
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_AzureSQL_ControlDB",
+          "type": "LinkedServiceReference"
+        }
+      },
+      {
+        "name": "OnCopyFailure",
+        "description": "Log failure details and send an alert if the copy activity fails.",
+        "type": "SqlServerStoredProcedure",
+        "dependsOn": [
+          {
+            "activity": "CopyOrdersFromREST",
+            "dependencyConditions": ["Failed"]
+          }
+        ],
+        "policy": {
+          "timeout": "0.00:02:00",
+          "retry": 1,
+          "retryIntervalInSeconds": 10
+        },
+        "typeProperties": {
+          "storedProcedureName": "dbo.usp_LogPipelineError",
+          "storedProcedureParameters": {
+            "PipelineName": {
+              "value": {
+                "value": "@pipeline().Pipeline",
+                "type": "Expression"
+              },
+              "type": "String"
+            },
+            "RunId": {
+              "value": {
+                "value": "@pipeline().RunId",
+                "type": "Expression"
+              },
+              "type": "String"
+            },
+            "ErrorMessage": {
+              "value": {
+                "value": "@activity('CopyOrdersFromREST').error.message",
+                "type": "Expression"
+              },
+              "type": "String"
+            },
+            "FailedActivity": {
+              "value": "CopyOrdersFromREST",
+              "type": "String"
+            }
+          }
+        },
+        "linkedServiceName": {
+          "referenceName": "LS_AzureSQL_ControlDB",
+          "type": "LinkedServiceReference"
+        }
+      }
+    ],
+    "annotations": [
+      "orders",
+      "incremental",
+      "watermark",
+      "adls",
+      "parquet"
+    ],
+    "lastPublishTime": "2024-01-15T00:00:00Z"
+  },
+  "type": "Microsoft.DataFactory/factories/pipelines"
+}
